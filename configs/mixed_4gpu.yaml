@@ -1,0 +1,91 @@
+# One-command mixed-dataset preparation and four-GPU training:
+#   python -u scripts/train_mixed.py --config configs/mixed_4gpu.yaml
+# Check annotations/features and create links without training:
+#   python -u scripts/train_mixed.py --config configs/mixed_4gpu.yaml --prepare-only
+
+name: RQ_VQA_ABCDE_mixed_aigc_enhanced
+
+# splits:
+#   train: /mnt/data/local-disk3/xyy/dataset/blance-ABCDE/mix/train.txt
+#   val: /mnt/data/local-disk3/xyy/dataset/blance-ABCDE/mix/val.txt
+#   test: /mnt/data/local-disk3/xyy/dataset/blance-ABCDE/mix/test.txt
+
+splits:
+  train: /mnt/data/local-disk3/xyy/dataset/blance-ABCDE/datasets/aigc/train.txt
+  val: /mnt/data/local-disk3/xyy/dataset/blance-ABCDE/datasets/aigc/val.txt
+  test: /mnt/data/local-disk3/xyy/dataset/blance-ABCDE/datasets/aigc/test.txt
+
+# Existing features are searched recursively below this directory.
+feature_search_root: /mnt/data/local-disk3/xyy/dataset/RD-VQA-Feature
+
+# This contains only annotations and symbolic links, not copied feature arrays.
+prepared_root: /mnt/data/local-disk3/xyy/dataset/RD-VQA-Feature/MIX-ABCDE
+
+# Leave empty when every basename resolves to exactly one feature set. If two
+# datasets contain the same basename, add rules using their original video roots.
+source_rules: []
+# Example:
+source_rules:
+  - name: AIGC
+    video_prefix: /mnt/data/local-disk3/xyy/dataset/AIGC-test/AIGC
+    feature_root: /mnt/data/local-disk3/xyy/dataset/RD-VQA-Feature/AIGC
+  # - name: VSR1
+  #   video_prefix: /mnt/data/local-disk3/xyy/dataset/avt-vqdb-uhd-1-vsr/upscaled-mp4
+  #   feature_root: /mnt/data/local-disk3/xyy/dataset/RD-VQA-Feature/VSR1
+  # - name: finevd
+  #   video_prefix: /mnt/data/local-disk2/xyy/datasets/FineVD/videos_all_videos
+  #   feature_root: /mnt/data/local-disk3/xyy/dataset/RD-VQA-Feature/FineVD
+  # - name: Konvid
+  #   video_prefix: /mnt/data/local-disk3/xyy/dataset/KoNViD-1k/KoNViD_1k_videos
+  #   feature_root: /mnt/data/local-disk3/xyy/dataset/RD-VQA-Feature/Konvid
+  # - name: vdpve
+  #   video_prefix: /mnt/data/local-disk2/xyy/datasets/VDPVE/train
+  #   feature_root: /mnt/data/local-disk3/xyy/dataset/RD-VQA-Feature/VDPVE
+  # - name: sdr
+  #   video_prefix: /mnt/data/local-disk3/xyy/dataset/LIVE_Paired_Comparison_HDRvsSDR_Database #/open-sourced_HDR10
+  #   feature_root: /mnt/data/local-disk3/xyy/dataset/RD-VQA-Feature/sdr
+
+nproc_per_node: 4
+
+training:
+  database: MIX_ABCDE
+  model_name: RQ_VQA
+  use_liqe: false
+
+  # Start from a full noLIQE RQ-VQA checkpoint. Set finetune_path to null for
+  # the model's default ImageNet-pretrained Swin initialization, or use
+  # pretrained_path only for compatible LSVQ base-model weights.
+  pretrained_path: null
+  finetune_path: /mnt/data/local-disk3/xyy/RQ-VQA/ckpts/MIX_ABCDE_noLIQE_ddp/RQ_VQA_noLIQE_MIX_ABCDE_plcc_NR_v0_epoch_7_SRCC_0.757319.pth
+
+  visible_devices: "4,5,6,7"
+  expected_world_size: 4
+  gpu_ids: [0]
+  multi_gpu: false
+  train_batch_size: 2
+  num_workers: 4
+  random_seed: 10
+  n_exp: 1
+  resize: 384
+  crop_size: 384
+
+  epochs: 5
+  freeze_backbone_epochs: 3
+  backbone_lr: 0.000001
+  head_lr: 0.00001
+  weight_decay: 0.0000001
+  warmup_epochs: 3
+  min_lr_ratio: 0.01
+  grad_clip_norm: 1.0
+  amp: true
+  amp_dtype: bfloat16
+  amp_init_scale: 1024
+  max_nonfinite_steps: 5
+  sync_batchnorm: true
+  loss_type: plcc
+  early_stop_patience: 10
+  early_stop_min_delta: 0.001
+  print_samples: 128
+
+  ckpt_path: ckpts/MIX_ABCDE_noLIQE_ddp_aigc_enhance
+  log_file: logs/MIX_ABCDE_noLIQE_ddp_aigc_enhance.log

@@ -2,11 +2,8 @@ import numpy as np
 from scipy.optimize import curve_fit
 from scipy import stats
 import torch
-import torch.nn.functional as F
-import torchsort
 
 
-import torch.nn as nn
 def logistic_func(X, bayta1, bayta2, bayta3, bayta4):
     logisticPart = 1 + np.exp(np.negative(np.divide(X - bayta3, np.abs(bayta4))))
     yhat = bayta2 + np.divide(bayta1 - bayta2, logisticPart)
@@ -40,11 +37,16 @@ def performance_no_fit(y_label, y_output):
     return PLCC, SRCC, KRCC, RMSE
 
 
-def plcc_loss(y_pred, y):
-    sigma_hat, m_hat = torch.std_mean(y_pred, unbiased=False)
-    y_pred = (y_pred - m_hat) / (sigma_hat + 1e-8)
-    sigma, m = torch.std_mean(y, unbiased=False)
-    y = (y - m) / (sigma + 1e-8)
+def plcc_loss(y_pred, y, eps=1e-4):
+    """Numerically stable PLCC loss for small distributed batches."""
+    y_pred = y_pred.float()
+    y = y.float()
+    pred_centered = y_pred - y_pred.mean()
+    label_centered = y - y.mean()
+    # rsqrt(var + eps) has a bounded derivative when initial predictions are
+    # almost constant. std + 1e-8 produced gradient spikes under FP16.
+    y_pred = pred_centered * torch.rsqrt(pred_centered.square().mean() + eps)
+    y = label_centered * torch.rsqrt(label_centered.square().mean() + eps)
     loss0 = torch.nn.functional.mse_loss(y_pred, y) / 4
     rho = torch.mean(y_pred * y)
     loss1 = torch.nn.functional.mse_loss(rho * y_pred, y) / 4

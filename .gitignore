@@ -1,0 +1,39 @@
+__pycache__/
+*.py[cod]# 数据集、视频、图片
+datasets/
+data/
+*.mp4
+*.avi
+*.png
+*.jpg
+*.jpeg
+*.webp
+
+# 模型权重、checkpoint
+weights/
+checkpoints/
+*.bin
+*.pth
+*.ckpt
+
+# 日志、缓存
+logs/
+runs
+__pycache__/
+*.pyc
+.cache/
+tmp/
+temp/
+
+# 环境
+env/
+venv/
+(rqvqa)/
+
+# zip压缩包
+*.zip
+ckpts/
+results/
+tests/
+
+.gitignore

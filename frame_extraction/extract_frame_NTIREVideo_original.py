@@ -1,6 +1,7 @@
 import os
 import cv2
 import pandas as pd
+import argparse
 
 def extract_frame(videos_dir, video_name, save_folder):
     filename = os.path.join(videos_dir, video_name)

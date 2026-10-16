@@ -1,0 +1,54 @@
+# Copy this file, replace feature_root, ckpt_path and log_file, then launch with:
+# torchrun --standalone --nproc_per_node=4 train.py --config configs/your_finevd.yaml
+database: aigc
+model_name: RQ_VQA
+feature_root: /mnt/data/local-disk3/xyy/dataset/RD-VQA-Feature/AIGC
+
+datainfo: ${feature_root}/annotations/train.csv
+val_datainfo: ${feature_root}/annotations/val.csv
+videos_dir: ${feature_root}/train/image_384p
+slowfast_dir: ${feature_root}/train/SlowFast
+fastvqa_dir: ${feature_root}/train/FASTVQA
+val_videos_dir: ${feature_root}/val/image_384p
+val_slowfast_dir: ${feature_root}/val/SlowFast
+val_fastvqa_dir: ${feature_root}/val/FASTVQA
+
+use_liqe: false
+liqe_dir: null
+val_liqe_dir: null
+
+# Full-model cross-dataset fine-tuning from the best VDPVE checkpoint.
+pretrained_path: null
+finetune_path: /mnt/data/local-disk3/xyy/RQ-VQA/ckpts/MIX_ABCDE_noLIQE_ddp_aigc_enhance/RQ_VQA_noLIQE_MIX_ABCDE_plcc_NR_v0_epoch_5_SRCC_0.854395.pth
+
+visible_devices: "2,4,5,7"
+expected_world_size: 4
+gpu_ids: [0]
+multi_gpu: false
+train_batch_size: 2       # Per GPU; global batch = 8.
+num_workers: 4            # Per process; four workers means 16 total.
+random_seed: 10
+n_exp: 1
+resize: 384
+crop_size: 384
+
+epochs: 3
+freeze_backbone_epochs: 3
+backbone_lr: 0.000001
+head_lr: 0.00001
+weight_decay: 0.0000001
+warmup_epochs: 3
+min_lr_ratio: 0.01
+grad_clip_norm: 1.0
+amp: true
+amp_dtype: bfloat16       # L20: wider dynamic range than float16; no loss scaling needed.
+amp_init_scale: 1024      # Used only when amp_dtype is float16.
+max_nonfinite_steps: 5
+sync_batchnorm: true
+loss_type: plcc
+early_stop_patience: 10
+early_stop_min_delta: 0.001
+print_samples: 128
+
+ckpt_path: ckpts/FINEVD_official_ddp
+log_file: logs/FINEVD_official_ddp.log

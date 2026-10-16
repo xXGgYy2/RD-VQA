@@ -1,281 +1,241 @@
 # -*- coding: utf-8 -*-
-import argparse
 import os
+if __name__ == '__main__':
+    from train_options import parse_config
+    config = parse_config()
+    if config.visible_devices is not None:
+        os.environ['CUDA_VISIBLE_DEVICES'] = config.visible_devices
 
-import numpy as np
-import torch
-import torch.optim as optim
+import json
+import math
 import random
-import torch.nn as nn
+import time
+from pathlib import Path
+import numpy as np
 import scipy.io as scio
-
+import torch
+import torch.distributed as dist
+import torch.distributed.nn.functional as dist_nn
+import torch.optim as optim
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
+from torchvision import transforms
 from data_loader import BVQA_VideoDataset_RQ_VQA
-from utils import performance_fit
-from utils import plcc_loss
-
+from early_stopping import EarlyStopping
+from utils import performance_fit, plcc_loss
 import models
 
-from torchvision import transforms
-import time
 
-def main(config):
-
-    all_val_SRCC, all_val_KRCC, all_val_PLCC, all_val_RMSE = [], [], [], []
-    save_model_name_all = []
-
-    for i in range(config.n_exp):
-        config.exp_version = i
-        print('%d round training starts here' % i)
-        if config.random_seed != 0:
-            seed = (i+1) * config.random_seed
-        else:
-            seed = i * 1
-
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        
-        if config.model_name == 'RQ_VQA':
-            print('The current model is ' + config.model_name)
-            model = models.RQ_VQA(config.pretrained_path)
+def ctx(cfg):
+    world = int(os.getenv('WORLD_SIZE', '1'))
+    rank = int(os.getenv('RANK', '0'))
+    local = int(os.getenv('LOCAL_RANK', '0'))
+    if world > 1:
+        if not torch.cuda.is_available():
+            raise RuntimeError('DDP requires CUDA')
+        torch.cuda.set_device(local)
+        dist.init_process_group('nccl')
+        device = torch.device('cuda', local)
+    elif torch.cuda.is_available():
+        index = cfg.gpu_ids[0] if cfg.gpu_ids else 0
+        torch.cuda.set_device(index)
+        device = torch.device('cuda', index)
+    else:
+        device = torch.device('cpu')
+    return world, rank, local, device
 
 
-        if config.multi_gpu:
-            model = torch.nn.DataParallel(model, device_ids=config.gpu_ids)
-            model = model.to(device)
-        else:
-            model = model.to(device)
-        
-
-        # optimizer
-        optimizer = optim.Adam(model.parameters(), lr = config.conv_base_lr, weight_decay = 0.0000001)
-
-        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=config.decay_interval, gamma=config.decay_ratio)
-
-        if config.loss_type == 'plcc':
-            criterion = plcc_loss
-
-        param_num = 0
-        for param in model.parameters():
-            param_num += int(np.prod(param.shape))
-        print('Trainable params: %.2f million' % (param_num / 1e6))
+def main_only(rank, *args, **kwargs):
+    if rank == 0:
+        print(*args, **kwargs, flush=True)
 
 
-        transformations_train = transforms.Compose([transforms.Resize(config.resize), transforms.RandomCrop(config.crop_size), transforms.ToTensor(),\
-            transforms.Normalize(mean = [0.485, 0.456, 0.406], std = [0.229, 0.224, 0.225])])
-        transformations_test = transforms.Compose([transforms.Resize(config.resize),transforms.CenterCrop(config.crop_size),transforms.ToTensor(),\
-            transforms.Normalize(mean = [0.485, 0.456, 0.406], std = [0.229, 0.224, 0.225])])
-        ## training data
-        
-        if config.database == 'NTIREVideo':
-            datainfo = 'data/train_data.csv'
-            videos_dir = '/data/sunwei_data/ntire_video/image_384p'
-
-            feature_dir = '/data/sunwei_data/ntire_video/NTIREVideo_Train_SlowFast_feature/'
-
-            feature_visual_dir = '/data/sunwei_data/ntire_video/qalign_features_frames/'
-            feature_LIQE_dir = '/data/sunwei_data/ntire_video/LIQE_feature/'
-            feature_FASTVQA_dir = '/data/sunwei_data/ntire_video/FASTVQA/sampled/'
-            trainset = BVQA_VideoDataset_RQ_VQA(videos_dir, feature_dir, feature_visual_dir, feature_LIQE_dir, feature_FASTVQA_dir, datainfo, transformations_train, 'NTIREVideo_train', config.crop_size, seed=seed)
-            valset = BVQA_VideoDataset_RQ_VQA(videos_dir, feature_dir, feature_visual_dir, feature_LIQE_dir, feature_FASTVQA_dir, datainfo, transformations_test, 'NTIREVideo_val', config.crop_size, seed=seed)
+def set_backbone(model, enabled):
+    for parameter in model.feature_extraction.parameters():
+        parameter.requires_grad = enabled
 
 
-
-        ## dataloader
-        train_loader = torch.utils.data.DataLoader(trainset, batch_size=config.train_batch_size,
-            shuffle=True, num_workers=config.num_workers)
-
-        val_loader = torch.utils.data.DataLoader(valset, batch_size=1,
-            shuffle=True, num_workers=config.num_workers)
-
-
-
-        best_val_criterion = -1  # SROCC min
-        best_val = []
-
-        print('Starting training:')
-
-        old_save_name = None
-        old_mat_name = None
-
-        for epoch in range(config.epochs):
-            model.train()
-            batch_losses = []
-            batch_losses_each_disp = []
-            session_start_time = time.time()
-
-            for i, (video, feature_3D, feature_llm, feature_liqe, feature_fastvqa, mos, _) in enumerate(train_loader):
-                
-
-                video = video.to(device)
-                feature_3D = feature_3D.to(device)
-                feature_llm = feature_llm.to(device)
-                feature_liqe = feature_liqe.to(device)
-                feature_fastvqa = feature_fastvqa.to(device)
-                labels = mos.to(device).float()
-                
-
-                outputs = model(video, feature_3D, feature_llm, feature_liqe, feature_fastvqa)
-
-                optimizer.zero_grad()
-                
-                loss = criterion(labels, outputs)
-
-                batch_losses.append(loss.item())
-                batch_losses_each_disp.append(loss.item())
-                loss.backward()
-                
-                optimizer.step()
-
-                if (i+1) % (config.print_samples//config.train_batch_size) == 0:
-                    session_end_time = time.time()
-                    avg_loss_epoch = sum(batch_losses_each_disp) / (config.print_samples//config.train_batch_size)
-                    print('Epoch: %d/%d | Step: %d/%d | Training loss: %.4f' % \
-                        (epoch + 1, config.epochs, i + 1, len(trainset) // config.train_batch_size, \
-                            avg_loss_epoch))
-                    batch_losses_each_disp = []
-                    print('CostTime: {:.4f}'.format(session_end_time - session_start_time))
-                    session_start_time = time.time()
-
-            avg_loss = sum(batch_losses) / (len(trainset) // config.train_batch_size)
-            print('Epoch %d averaged training loss: %.4f' % (epoch + 1, avg_loss))
-
-            scheduler.step()
-            lr = scheduler.get_last_lr()
-            print('The current learning rate is {:.06f}'.format(lr[0]))
-            
-
-            # Val
-            with torch.no_grad():
-                model.eval()
-                label = np.zeros([len(valset)])
-                y_output = np.zeros([len(valset)])
-
-                for i, (video, feature_3D, feature_llm, feature_liqe, feature_fastvqa, mos, _) in enumerate(val_loader):
-                    
-                    video = video.to(device)
-                    feature_3D = feature_3D.to(device)
-                    feature_llm = feature_llm.to(device)
-                    feature_liqe = feature_liqe.to(device)
-                    feature_fastvqa = feature_fastvqa.to(device)
-
-                    label[i] = mos.item()
-
-                    outputs = model(video, feature_3D, feature_llm, feature_liqe, feature_fastvqa)
-
-                    y_output[i] = outputs.item()
-
-                
-                val_PLCC, val_SRCC, val_KRCC, val_RMSE = performance_fit(label, y_output)
-                
-                print('Epoch {} completed. The result on the val databaset: SRCC: {:.4f}, KRCC: {:.4f}, PLCC: {:.4f}, and RMSE: {:.4f}'.format(epoch + 1, \
-                    val_SRCC, val_KRCC, val_PLCC, val_RMSE))
-                
-                
-
-                    
-                if val_SRCC > best_val_criterion:
-                    print("Update best model using best_val_criterion in epoch {}".format(epoch + 1))
-                    best_val_criterion = val_SRCC
-                    best_val = [val_SRCC, val_KRCC, val_PLCC, val_RMSE]
-
-                    print('Saving model...')
-                    if not os.path.exists(config.ckpt_path):
-                        os.makedirs(config.ckpt_path)
-
-                    if epoch > 0:
-                        if os.path.exists(old_save_name):
-                            os.remove(old_save_name)
-                        if os.path.exists(old_mat_name):
-                            os.remove(old_mat_name)
-
-                    save_model_name = os.path.join(config.ckpt_path, config.model_name + '_' + \
-                        config.database + '_' + config.loss_type + '_NR_v'+ str(config.exp_version) \
-                            + '_epoch_%d_SRCC_%f.pth' % (epoch + 1, val_SRCC))
-
-                    save_mat_name = os.path.join(config.ckpt_path, config.model_name + '_' + \
-                        config.database + '_' + config.loss_type + '_NR_v'+ str(config.exp_version) \
-                            + '_epoch_%d_SRCC_%f.mat' % (epoch + 1, val_SRCC))
-                    torch.save(model.state_dict(), save_model_name)
-                    old_save_name = save_model_name
-                    old_mat_name = save_mat_name
-
-            save_model_name_all.append(save_model_name)
-
-            print('Training completed.')
-            print('The best training result on the test dataset SRCC: {:.4f}, KRCC: {:.4f}, PLCC: {:.4f}, and RMSE: {:.4f}'.format( \
-                best_val[0], best_val[1], best_val[2], best_val[3]))
-            print('*************************************************************************************************************************')
-
-        all_val_SRCC.append(best_val[0])
-        all_val_KRCC.append(best_val[1])
-        all_val_PLCC.append(best_val[2])
-        all_val_RMSE.append(best_val[3])
-   
-    
-    save_mat_name = os.path.join(config.ckpt_path, config.model_name + '_' + \
-        config.database + '_' + config.loss_type + '.mat')    
-    scio.savemat(save_mat_name, {'save_model_name_all':save_model_name_all})
-    
-    print('*************************************************************************************************************************')
-    print('SRCC:')
-    print(all_val_SRCC)
-    print('KRCC:')
-    print(all_val_KRCC)
-    print('PLCC:')
-    print(all_val_PLCC)
-    print('RMSE:')
-    print(all_val_RMSE)
-    print(
-        'The avg results SRCC: {:.4f}, KRCC: {:.4f}, PLCC: {:.4f}, and RMSE: {:.4f}'.format( \
-            np.mean(all_val_SRCC), np.mean(all_val_KRCC), np.mean(all_val_PLCC), np.mean(all_val_RMSE)))
-
-    print(
-        'The std results SRCC: {:.4f}, KRCC: {:.4f}, PLCC: {:.4f}, and RMSE: {:.4f}'.format( \
-            np.std(all_val_SRCC), np.std(all_val_KRCC), np.std(all_val_PLCC), np.std(all_val_RMSE)))
-
-    print(
-        'The median results SRCC: {:.4f}, KRCC: {:.4f}, PLCC: {:.4f}, and RMSE: {:.4f}'.format( \
-            np.median(all_val_SRCC), np.median(all_val_KRCC), np.median(all_val_PLCC), np.median(all_val_RMSE)))
-    print('*************************************************************************************************************************')
-        
-if __name__ == '__main__':
-
-    parser = argparse.ArgumentParser()
-    # input parameters
-    parser.add_argument('--database', type=str)
-    parser.add_argument('--model_name', type=str)
-    parser.add_argument('--conv_base_lr', type=float, default=1e-5)
-    parser.add_argument('--decay_ratio', type=float, default=0.95)
-    parser.add_argument('--decay_interval', type=int, default=2)
-    parser.add_argument('--results_path', type=str)
-    parser.add_argument('--print_samples', type=int, default = 0)
-    parser.add_argument('--train_batch_size', type=int, default=1)
-    parser.add_argument('--num_workers', type=int, default=8)
-    parser.add_argument('--resize', type=int, default=520)
-    parser.add_argument('--crop_size', type=int, default=448)
-    parser.add_argument('--epochs', type=int, default=30)
-    parser.add_argument('--ckpt_path', type=str, default='ckpts')
-    parser.add_argument('--pretrained_path', type=str, default=None)
-    parser.add_argument('--multi_gpu', action='store_true')
-    parser.add_argument('--motion', action='store_true')
-    parser.add_argument('--gpu_ids', type=list, default=None)
-    parser.add_argument('--n_exp', type=int)
-    parser.add_argument('--random_seed', type=int, default=0)
-    parser.add_argument('--loss_type', type=str, default='plcc')
-
-    
-    config = parser.parse_args()
+def optimizer_for(model, cfg):
+    backbone = list(model.feature_extraction.parameters())
+    ids = {id(p) for p in backbone}
+    head = [p for p in model.parameters() if id(p) not in ids]
+    return optim.Adam([
+        {'params': backbone, 'lr': cfg.backbone_lr},
+        {'params': head, 'lr': cfg.head_lr},
+    ], weight_decay=cfg.weight_decay)
 
 
-    torch.manual_seed(config.random_seed)  #
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    np.random.seed(config.random_seed)
-    random.seed(config.random_seed)
-    main(config)
+def make_scheduler(opt, cfg):
+    def rate(epoch):
+        if epoch < cfg.warmup_epochs:
+            return max(1e-8, (epoch + 1) / cfg.warmup_epochs)
+        total = max(1, cfg.epochs - cfg.warmup_epochs)
+        progress = min(1., max(0., (epoch - cfg.warmup_epochs) / total))
+        return cfg.min_lr_ratio + (1 - cfg.min_lr_ratio) * .5 * (1 + math.cos(math.pi * progress))
+    return optim.lr_scheduler.LambdaLR(opt, rate)
 
 
+def global_loss(y, pred, distributed):
+    if distributed:
+        y = torch.cat(dist_nn.all_gather(y.float()))
+        pred = torch.cat(dist_nn.all_gather(pred.float()))
+    # utils.plcc_loss expects predictions first. The legacy training loop passed
+    # these in reverse order, which made the asymmetric second term optimize MOS.
+    return plcc_loss(pred, y)
 
 
+def datasets(cfg, seed):
+    tr = transforms.Compose([transforms.Resize(cfg.resize), transforms.RandomCrop(cfg.crop_size),
+                             transforms.ToTensor(), transforms.Normalize([.485,.456,.406],[.229,.224,.225])])
+    va = transforms.Compose([transforms.Resize(cfg.resize), transforms.CenterCrop(cfg.crop_size),
+                             transforms.ToTensor(), transforms.Normalize([.485,.456,.406],[.229,.224,.225])])
+    common = dict(data_dir=cfg.videos_dir, data_dir_3D=cfg.slowfast_dir,
+                  data_dir_FASTVQA=cfg.fastvqa_dir, filename_path=cfg.datainfo,
+                  crop_size=cfg.crop_size, seed=seed, use_liqe=cfg.use_liqe,
+                  data_dir_LIQE=cfg.liqe_dir)
+    if cfg.val_datainfo:
+        train = BVQA_VideoDataset_RQ_VQA(transform=tr, database_name='explicit', **common)
+        val = BVQA_VideoDataset_RQ_VQA(database_name='explicit',
+            filename_path=cfg.val_datainfo, data_dir=cfg.val_videos_dir or cfg.videos_dir,
+            data_dir_3D=cfg.val_slowfast_dir or cfg.slowfast_dir,
+            data_dir_FASTVQA=cfg.val_fastvqa_dir or cfg.fastvqa_dir,
+            data_dir_LIQE=cfg.val_liqe_dir or cfg.liqe_dir, transform=va,
+            crop_size=cfg.crop_size, seed=seed, use_liqe=cfg.use_liqe)
+    else:
+        train = BVQA_VideoDataset_RQ_VQA(transform=tr, database_name='NTIREVideo_train', **common)
+        val = BVQA_VideoDataset_RQ_VQA(transform=va, database_name='NTIREVideo_val', **common)
+    if cfg.val_datainfo and set(train.video_names) & set(val.video_names):
+        raise ValueError('Training and validation videos overlap')
+    return train, val
 
 
+def validate(model, loader, device):
+    model.eval(); y = np.zeros(len(loader.dataset)); p = np.zeros(len(loader.dataset))
+    with torch.no_grad():
+        for i, (*inputs, mos, _) in enumerate(loader):
+            p[i] = model(*[x.to(device, non_blocking=True) for x in inputs]).item(); y[i] = mos.item()
+    return performance_fit(y, p)
 
+
+def experiment(cfg, exp, world, rank, local, device):
+    seed = (exp + 1) * cfg.random_seed if cfg.random_seed else exp
+    torch.manual_seed(seed); torch.cuda.manual_seed_all(seed); np.random.seed(seed); random.seed(seed)
+    torch.backends.cudnn.deterministic = True; torch.backends.cudnn.benchmark = False
+    train, val = datasets(cfg, seed)
+    sampler = DistributedSampler(train, num_replicas=world, rank=rank, shuffle=True, seed=seed) if world > 1 else None
+    loader = torch.utils.data.DataLoader(train, batch_size=cfg.train_batch_size, sampler=sampler,
+        shuffle=sampler is None, num_workers=cfg.num_workers, pin_memory=device.type == 'cuda',
+        persistent_workers=cfg.num_workers > 0, drop_last=True)
+    if not len(loader): raise ValueError('Per-GPU batch is too large for this training split')
+    vloader = torch.utils.data.DataLoader(val, batch_size=1, shuffle=False, num_workers=cfg.num_workers,
+        pin_memory=device.type == 'cuda', persistent_workers=cfg.num_workers > 0) if rank == 0 else None
+    model = models.RQ_VQA(cfg.pretrained_path, use_liqe=cfg.use_liqe, pretrained=not bool(cfg.finetune_path))
+    if cfg.finetune_path:
+        from test import load_checkpoint
+        load_checkpoint(model, cfg.finetune_path)
+    model.to(device)
+    if world > 1 and cfg.sync_batchnorm:
+        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
+    raw = model
+    opt = optimizer_for(raw, cfg); scheduler = make_scheduler(opt, cfg)
+    if world > 1:
+        model = DDP(model, device_ids=[local], output_device=local,
+                    find_unused_parameters=cfg.freeze_backbone_epochs > 0)
+    amp = cfg.amp and device.type == 'cuda'
+    amp_dtype = torch.bfloat16 if cfg.amp_dtype == 'bfloat16' else torch.float16
+    if amp and amp_dtype is torch.bfloat16 and not torch.cuda.is_bf16_supported():
+        raise RuntimeError('This GPU/PyTorch build does not support bfloat16; set amp_dtype: float16')
+    scaler_enabled = amp and amp_dtype is torch.float16
+    scaler = torch.cuda.amp.GradScaler(enabled=scaler_enabled, init_scale=cfg.amp_init_scale)
+    stopper = EarlyStopping(cfg.early_stop_patience, cfg.early_stop_min_delta)
+    best, best_path = -float('inf'), None
+    for epoch in range(cfg.epochs):
+        if sampler: sampler.set_epoch(epoch)
+        enabled = epoch >= cfg.freeze_backbone_epochs; set_backbone(raw, enabled)
+        model.train()
+        if not enabled: raw.feature_extraction.eval()
+        total = 0.; completed_steps = 0; skipped_steps = 0
+        for inputs in loader:
+            *features, labels, _ = inputs
+            features = [x.to(device, non_blocking=True) for x in features]; labels = labels.to(device).float()
+            opt.zero_grad(set_to_none=True)
+            with torch.cuda.amp.autocast(enabled=amp, dtype=amp_dtype):
+                loss = global_loss(labels, model(*features), world > 1)
+            if not torch.isfinite(loss):
+                raise RuntimeError(f'Non-finite loss at epoch {epoch + 1}; check MOS and features')
+            scaler.scale(loss).backward(); scaler.unscale_(opt)
+            norm = torch.nn.utils.clip_grad_norm_(raw.parameters(), cfg.grad_clip_norm)
+            finite = torch.tensor(int(torch.isfinite(norm)), device=device)
+            if world > 1:
+                dist.all_reduce(finite, op=dist.ReduceOp.MIN)
+            if not finite.item():
+                skipped_steps += 1
+                # FP16 GradScaler records overflow during unscale_ and reduces
+                # its scale here. BF16 skips the bad update without corrupting weights.
+                if scaler_enabled:
+                    scaler.step(opt); scaler.update()
+                opt.zero_grad(set_to_none=True)
+                main_only(rank, f'Warning: skipped non-finite gradient at epoch '
+                                  f'{epoch + 1} (count={skipped_steps})')
+                if skipped_steps > cfg.max_nonfinite_steps:
+                    raise RuntimeError('Too many consecutive non-finite gradient steps')
+                continue
+            scaler.step(opt); scaler.update(); total += loss.item(); completed_steps += 1
+            skipped_steps = 0
+        scheduler.step()
+        if completed_steps == 0:
+            raise RuntimeError(f'No finite optimizer step completed in epoch {epoch + 1}')
+        if world > 1:
+            stat = torch.tensor([total, completed_steps], dtype=torch.float64, device=device); dist.all_reduce(stat)
+            train_loss = (stat[0] / stat[1]).item()
+        else: train_loss = total / completed_steps
+        main_only(rank, f'Epoch {epoch+1}/{cfg.epochs}: loss={train_loss:.4f}, '
+                        f'lr={[g["lr"] for g in opt.param_groups]}, backbone={enabled}, '
+                        f'amp={cfg.amp_dtype if amp else "off"}')
+        stop = False
+        if rank == 0:
+            plcc, srcc, krcc, rmse = validate(raw, vloader, device)
+            print(f'Val SRCC={srcc:.4f}, KRCC={krcc:.4f}, PLCC={plcc:.4f}, RMSE={rmse:.4f}', flush=True)
+            if np.isfinite(srcc) and srcc > best:
+                best = srcc; path = Path(cfg.ckpt_path) / f'RQ_VQA_{"LIQE" if cfg.use_liqe else "noLIQE"}_{cfg.database}_plcc_NR_v{exp}_epoch_{epoch+1}_SRCC_{srcc:.6f}.pth'
+                torch.save(raw.state_dict(), path)
+                if best_path and Path(best_path).exists(): Path(best_path).unlink()
+                best_path = str(path); print(f'Best checkpoint: {best_path}', flush=True)
+            stop = stopper.step(srcc)
+        if world > 1:
+            flag = torch.tensor(int(stop), device=device); dist.broadcast(flag, 0); stop = bool(flag.item())
+        if stop: break
+    if world > 1: dist.barrier()
+    return best_path if rank == 0 else None
+
+
+def main(cfg):
+    world, rank, local, device = ctx(cfg)
+    if world != cfg.expected_world_size:
+        if world > 1 and dist.is_initialized():
+            dist.destroy_process_group()
+        raise ValueError(f'Expected {cfg.expected_world_size} process(es), got {world}. '
+                         f'Launch with torchrun --nproc_per_node={cfg.expected_world_size}.')
+    if cfg.multi_gpu: raise ValueError('Use torchrun for DDP; multi_gpu must be false')
+    if (cfg.train_batch_size < 1 or cfg.train_batch_size * world < 2 or
+            cfg.crop_size != 384 or cfg.resize < 384):
+        raise ValueError('PLCC requires global batch >=2; crop_size=384 and resize>=384')
+    if cfg.warmup_epochs >= cfg.epochs: raise ValueError('warmup_epochs must be less than epochs')
+    if cfg.freeze_backbone_epochs >= cfg.epochs: raise ValueError('freeze_backbone_epochs must be less than epochs')
+    if rank == 0:
+        from train_options import setup_log, validate_explicit_data
+        setup_log(cfg.log_file)
+        if cfg.val_datainfo: validate_explicit_data(cfg)
+        Path(cfg.ckpt_path).mkdir(parents=True, exist_ok=True)
+        Path(cfg.ckpt_path, 'resolved_config.json').write_text(
+            json.dumps(dict(vars(cfg), world_size=world,
+                            global_batch_size=cfg.train_batch_size * world),
+                       indent=2, default=str))
+    if world > 1: dist.barrier()
+    paths = [experiment(cfg, i, world, rank, local, device) for i in range(cfg.n_exp)]
+    if rank == 0:
+        scio.savemat(Path(cfg.ckpt_path) / f'{cfg.model_name}_{cfg.database}_plcc.mat', {'save_model_name_all': paths})
+    if world > 1: dist.destroy_process_group()
+
+
+if __name__ == '__main__': main(config)

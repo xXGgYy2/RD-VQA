@@ -43,11 +43,53 @@ In this paper, we present a simple but effective method to enhance blind video q
 
 ### Usage
 
+This local version removes Q-Align from RQ-VQA and makes LIQE optional. Swin + BoT,
+SlowFast Fast features (256 dimensions), and FAST-VQA (768 dimensions) are always
+used. LIQE is **off by default**; add `--use_liqe --liqe_dir PATH` to both training
+and testing to enable its 495 features. The fusion input is 2048 dimensions without
+LIQE and 2543 with LIQE. Disabled LIQE features are never loaded.
+
+```bash
+# Default: no Q-Align, no LIQE. Replace paths with your extracted data locations.
+python train.py --datainfo data/train_data.csv --videos_dir image_384p --slowfast_dir features/SlowFast --fastvqa_dir features/FASTVQA --pretrained_path ckpts/Swin_b_384_in22k_SlowFast_Fast_LSVQ.pth --ckpt_path ckpts/no_liqe
+
+# Add LIQE; train a separate model.
+python train.py --datainfo data/train_data.csv --videos_dir image_384p --slowfast_dir features/SlowFast --fastvqa_dir features/FASTVQA --pretrained_path ckpts/Swin_b_384_in22k_SlowFast_Fast_LSVQ.pth --use_liqe --liqe_dir features/LIQE --ckpt_path ckpts/with_liqe
+
+# Test the corresponding trained checkpoints (a single .pth file is also accepted).
+python test.py --pretrained_path ckpts/no_liqe --videos_dir test_image_384p --slowfast_dir features/SlowFast --fastvqa_dir features/FASTVQA --save_file results.csv
+python test.py --pretrained_path ckpts/with_liqe --videos_dir test_image_384p --slowfast_dir features/SlowFast --fastvqa_dir features/FASTVQA --use_liqe --liqe_dir features/LIQE --save_file results_liqe.csv
+```
+
+`train.py --pretrained_path` is the original **LSVQ initialization** checkpoint;
+omitting it uses ImageNet initialization. `test.py --pretrained_path` must point to
+**newly trained RQ-VQA** weights. Original full Q-Align model checkpoints are not
+compatible. The LIQE setting must match training; testing checks the regression
+head size and loads all parameters strictly. Saved names include `LIQE` or
+`noLIQE`; directory testing only selects the requested configuration. By default
+all matching checkpoints are averaged; `--n_exp N` limits their number.
+
+For a CSV entry `train/0001.mp4`, expected inputs are:
+
+```text
+image_384p/train/0001/000.png ... 007.png
+features/SlowFast/train/0001/feature_0_fast_feature.npy ... feature_7_fast_feature.npy
+features/FASTVQA/train/0001.npy  (or flat 0001.npy, as saved by the extractor)
+features/LIQE/train/0001/feature_0_LIQE_feature.npy ... feature_7_LIQE_feature.npy  (optional)
+```
+
+FAST-VQA is a single video vector repeated across the eight positions. Keep the
+frame/SlowFast temporal order aligned. Flat FAST-VQA folders must contain unique
+video basenames; use separate folders for splits with overlapping names.
+Use `--crop_size 384` (the default). Training
+retains the original KVQ split: 418 source groups with seven consecutive videos
+per group. Other datasets need their own split logic. `train_base_model.py` remains
+the original Swin + SlowFast baseline.
+
 #### Environments
-- Base model: timm==0.6.13 (higer version will cause error), pytorch>=1.13 (test on 1.13), torchvision, cv2, pandas
+- Base model: timm==0.6.13 (higher versions change the feature layout), pytorch>=1.13 (originally tested on 1.13), torchvision, opencv-python, pandas, scipy, einops
 - For FAST-VQA feature extraction: the same requirement in https://github.com/VQAssessment/FAST-VQA-and-FasterVQA
 - For LIQE feature extraction: ftfy, regex, tqdm, clip (pip install git+https://github.com/openai/CLIP.git)
-- For Q-Align feature extraction: the same requirement in https://github.com/Q-Future/Q-Align
 
 #### Dataset
 Download the [KVQ dataset](https://lixinustc.github.io/projects/KVQ/)
@@ -56,7 +98,7 @@ Download the [KVQ dataset](https://lixinustc.github.io/projects/KVQ/)
 - Frame extraction
 ```
 python frame_extraction/extract_frame_NTIREVideo_384p.py --filename_path data/train_data.csv --videos_dir /data/sunwei_data/ntire_video --save_folder /data/sunwei_data/ntire_video/test_image_384p
-python frame_extraction/extract_frame_NTIREVideo_original.py --filename_path data/train_data.csv --videos_dir /data/sunwei_data/ntire_video --save_folder /data/sunwei_data/ntire_video/test_image_original # for extracting LIQE and Q-Align features
+python frame_extraction/extract_frame_NTIREVideo_original.py --filename_path data/train_data.csv --videos_dir /data/sunwei_data/ntire_video --save_folder /data/sunwei_data/ntire_video/test_image_original # only needed when extracting LIQE features
 ```
 
 - SlowFast feature extraction
@@ -69,7 +111,7 @@ CUDA_VISIBLE_DEVICES=0 python -u feature_extraction/extract_SlowFast_feature_VQA
 --videos_dir /data/sunwei_data/ntire_video
 ```
 
-- LIQE features extraction
+- LIQE features extraction (optional; only with `--use_liqe`)
 
 Download the [model weights](https://drive.google.com/file/d/1GoKwUKNR-rvX11QbKRN8MuBZw2hXKHGh/view?usp=sharing)
 ```
@@ -102,22 +144,11 @@ CUDA_VISIBLE_DEVICES=0 python -u feature_extraction/extract_LIQE_feature_KVQ.py 
 
 You should put the path of data csvfile in Line 18 (data/train_data.csv), data path in Line 19, and pretrained [FAST_VQA_B_1*4.pth](https://1drv.ms/u/s!AsQt2I-RXJHQjoN0b_-BsMm-VHSGNw?e=PMKNTh) path in Line 50 in options/fast-b_NTIRE_UGC.yml
 ```
-cd features/FastVQA_feature
+cd feature_extraction/FastVQA_feature
 CUDA_VISIBLE_DEVICES=0 python extract_fastvqa_feature.py \
 --opt options/fast-b_NTIRE_UGC.yml \
 --save_path /data/sunwei_data/ntire_video/FASTVQA/sampled/
 ```
-- Q-Align features extraction
-```
-cd feature_extraction/Q-Align
-read the readme.txt for feature extraction 
-```
-
-
-
-
-
-
 To facilitate the reproduction of the experiments, we provide SlowFast, FASTVQA, LIQE and Q-Align features for the [KVQ training, validation, and test sets](https://www.dropbox.com/scl/fi/sp80tb9se3jxj8f0cptlx/features.tar?rlkey=ea7n5m4us1064c6wi7gbwgyvd&st=1198mttn&dl=0).
 
 - Train the model
@@ -127,6 +158,9 @@ Download the [pre-trained model](https://drive.google.com/file/d/1jgzVV0sil0kGhh
   CUDA_VISIBLE_DEVICES=0,1 python -u train.py \
  --database NTIREVideo \
  --model_name RQ_VQA \
+ --videos_dir /data/sunwei_data/ntire_video/image_384p \
+ --slowfast_dir /data/sunwei_data/ntire_video/NTIREVideo_Train_SlowFast_feature \
+ --fastvqa_dir /data/sunwei_data/ntire_video/FASTVQA/sampled \
  --pretrained_path /home/sunwei/code/VQA/SimpleVQA/ckpts/Swin_b_384_in22k_SlowFast_Fast_LSVQ.pth \
  --multi_gpu \
  --motion \
@@ -171,19 +205,17 @@ For computational efficiency, you can simply train the base model, which does no
 ```
 
 #### Test RQ-VQA
-- Download the [model weighs](https://www.dropbox.com/scl/fi/b551w7pha3wni0i4do143/ckpts.tar?rlkey=5w9folofqalnoi8lspqw7og3r&st=pj5p23kg&dl=0) trained on KVQ.
-- Extract video frames, SlowFast features, FASTVQA features, LIQE features, and Q-Align features of KVQ validation and test sets.
-- Run the code
-```
-CUDA_VISIBLE_DEVICES=0 python -u test.py \
---save_file results.csv \
---n_exp 10 \
---resize 384 \
---crop_size 384 \
---pretrained_path  \ # put the folder of trained model here
->> test.log
-```
+Use the testing commands above with newly trained checkpoints and the same LIQE
+setting. Extract frames, SlowFast and FAST-VQA features for the test videos; extract
+LIQE only when enabled. Q-Align features and weights are not required.
 
+### Local checks
+```bash
+python -m unittest discover -s tests -v
+```
+These checks use temporary images/features and lightweight backbone substitutes to
+verify data loading, both branch configurations, gradients, and checkpoint/testing
+integration without downloading pretrained weights.
 
 ### Citation
 **If you find this code is useful for  your research, please cite**:

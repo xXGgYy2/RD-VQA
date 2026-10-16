@@ -1,0 +1,136 @@
+# RQ-VQA multi-dataset evaluation.
+# Run from the repository root:
+#   python -u scripts/test_multi_dataset.py --config configs/multi_dataset_test.yaml
+# Validate annotations and extracted feature files without loading the model:
+#   python -u scripts/test_multi_dataset.py --config configs/multi_dataset_test.yaml --validate-only
+
+name: RQ_VQA_mix_best_aigc_enhance_multi_dataset_run03_test
+visible_devices: "6"
+num_workers: 4
+batch_size: 1
+random_seed: 10
+n_exp: 1
+output_root: results/RQ_VQA_VDPVE_best_multi_run_03_dataset
+test_load_path: /mnt/data/local-disk3/xyy/RQ-VQA/ckpts/FINEVD_official_ddp/RQ_VQA_noLIQE_aigc_plcc_NR_v0_epoch_5_SRCC_0.864506.pth
+
+model:
+  type: RQ_VQA
+  args:
+    # This value must match the checkpoint architecture. When true, every
+    # enabled dataset must also provide args.liqe_dir.
+    use_liqe: false
+
+data:
+  test-vsr1:
+    type: RQVQAPrecomputedDataset
+    enabled: true
+    args:
+      anno_file: /mnt/data/local-disk3/xyy/dataset/blance-ABCDE/datasets/vsr/test.txt
+      data_prefix: /
+      #data_prefix: /mnt/data/local-disk3/xyy/dataset/avt-vqdb-uhd-1-vsr/upscaled-mp4
+      # basename: extracted features are keyed only by the MP4 filename.
+      # relative: preserve annotation subdirectories under every feature root.
+      filename_mode: basename
+      feature_root: /mnt/data/local-disk3/xyy/dataset/RD-VQA-Feature/VSR1/test
+      frames_dir: ${feature_root}/image_384p
+      slowfast_dir: ${feature_root}/SlowFast
+      fastvqa_dir: ${feature_root}/FASTVQA
+      liqe_dir: null
+  test-vsr2:
+    type: RQVQAPrecomputedDataset
+    enabled: true
+    args:
+      anno_file: /mnt/data/local-disk3/xyy/dataset/VSR/vsr_list.txt
+      data_prefix: /mnt/data/local-disk3/xyy/dataset/VSR/sr
+      # 保留标签路径中的 01/x8、02/x4 等子目录。
+      filename_mode: relative
+      feature_root: /mnt/data/local-disk3/xyy/dataset/RD-VQA-Feature/VSR2/test
+      frames_dir: ${feature_root}/image_384p
+      slowfast_dir: ${feature_root}/SlowFast
+      fastvqa_dir: ${feature_root}/FASTVQA
+      liqe_dir: null
+  test-TAOBAO:
+    type: RQVQAPrecomputedDataset
+    enabled: true
+    args:
+      anno_file: /mnt/data/local-disk3/xyy/dataset/TaobaoLive/TaoLive_label.txt
+      data_prefix: /mnt/data/local-disk3/xyy/dataset/TaobaoLive/all_parts
+      # basename: extracted features are keyed only by the MP4 filename.
+      # relative: preserve annotation subdirectories under every feature root.
+      filename_mode: basename
+      feature_root: /mnt/data/local-disk3/xyy/dataset/RD-VQA-Feature/TAOBAO/test
+      frames_dir: ${feature_root}/image_384p
+      slowfast_dir: ${feature_root}/SlowFast
+      fastvqa_dir: ${feature_root}/FASTVQA
+      liqe_dir: null
+  test-SDR:
+    type: RQVQAPrecomputedDataset
+    enabled: true
+    args:
+      anno_file: /mnt/data/local-disk3/xyy/dataset/blance-ABCDE/datasets/hdr_sdr/test.txt
+      data_prefix: /
+      # data_prefix: /mnt/data/local-disk3/xyy/dataset/LIVE_Paired_Comparison_HDRvsSDR_Database/open-sourced_HDR10
+      # basename: extracted features are keyed only by the MP4 filename.
+      # relative: preserve annotation subdirectories under every feature root.
+      filename_mode: basename
+      feature_root: /mnt/data/local-disk3/xyy/dataset/RD-VQA-Feature/sdr/test
+      frames_dir: ${feature_root}/image_384p
+      slowfast_dir: ${feature_root}/SlowFast
+      fastvqa_dir: ${feature_root}/FASTVQA
+      liqe_dir: null
+  test-vdpve:
+    type: RQVQAPrecomputedDataset
+    enabled: true
+    args:
+      anno_file: /mnt/data/local-disk3/xyy/dataset/blance-ABCDE/datasets/vdpve/test.txt
+      filename_mode: basename
+      feature_root: /mnt/data/local-disk3/xyy/dataset/RD-VQA-Feature/VDPVE_blance_ABCDE/test
+      frames_dir: ${feature_root}/image_384p
+      slowfast_dir: ${feature_root}/SlowFast
+      fastvqa_dir: ${feature_root}/FASTVQA
+      liqe_dir: null
+  test-finevd:
+    type: RQVQAPrecomputedDataset
+    enabled: true
+    args:
+      anno_file: /mnt/data/local-disk3/xyy/dataset/blance-ABCDE/datasets/finevd/test.txt
+      filename_mode: basename
+      feature_root: /mnt/data/local-disk3/xyy/dataset/RD-VQA-Feature/FineVD_blance_ABCDE/test
+      frames_dir: ${feature_root}/image_384p
+      slowfast_dir: ${feature_root}/SlowFast
+      fastvqa_dir: ${feature_root}/FASTVQA
+      liqe_dir: null
+  test-aigc:
+    type: RQVQAPrecomputedDataset
+    enabled: true
+    args:
+      anno_file: /mnt/data/local-disk3/xyy/dataset/blance-ABCDE/datasets/aigc/test.txt
+      data_prefix: / # mnt/data/local-disk3/xyy/dataset/AIGC-test/AIGC
+      filename_mode: basename
+      feature_root: /mnt/data/local-disk3/xyy/dataset/RD-VQA-Feature/AIGC/test
+      frames_dir: ${feature_root}/image_384p
+      slowfast_dir: ${feature_root}/SlowFast
+      fastvqa_dir: ${feature_root}/FASTVQA
+      liqe_dir: null
+  test-konid:
+    type: RQVQAPrecomputedDataset
+    enabled: true
+    args:
+      anno_file: /mnt/data/local-disk3/xyy/dataset/blance-ABCDE/datasets/konvid/test.txt
+      filename_mode: basename
+      feature_root: /mnt/data/local-disk3/xyy/dataset/RD-VQA-Feature/Konvid/test
+      frames_dir: ${feature_root}/image_384p
+      slowfast_dir: ${feature_root}/SlowFast
+      fastvqa_dir: ${feature_root}/FASTVQA
+      liqe_dir: null
+  test-LIVE-VQC:
+    type: RQVQAPrecomputedDataset
+    enabled: true
+    args:
+      anno_file: /mnt/data/local-disk3/xyy/dataset/LIVE-Video-Quality-Challenge-VQC-Database/vqc_test.txt
+      filename_mode: basename
+      feature_root: /mnt/data/local-disk3/xyy/dataset/RD-VQA-Feature/LIVE-VQC/test
+      frames_dir: ${feature_root}/image_384p
+      slowfast_dir: ${feature_root}/SlowFast
+      fastvqa_dir: ${feature_root}/FASTVQA
+      liqe_dir: null

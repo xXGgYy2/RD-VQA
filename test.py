@@ -1,129 +1,102 @@
 # -*- coding: utf-8 -*-
 import argparse
-import os
-import pandas as pd
-import numpy as np
-import torch
-
+from pathlib import Path
 import random
 
-from data_loader import BVQA_VideoDataset
+import numpy as np
+import pandas as pd
+import torch
+from torchvision import transforms
 
+from data_loader import BVQA_VideoDataset
 import models
 
-from torchvision import transforms
+
+def load_checkpoint(model, path):
+    state_dict = torch.load(path, map_location='cpu')
+    # Accept checkpoints saved with or without DataParallel.
+    state_dict = {k[7:] if k.startswith('module.') else k: v for k, v in state_dict.items()}
+    weight = state_dict.get('quality.0.weight')
+    if weight is None or weight.shape != model.quality[0].weight.shape:
+        raise ValueError(f'{path}: incompatible checkpoint; retrain without Q-Align '
+                         'and use the same --use_liqe setting as training')
+    model.load_state_dict(state_dict)
 
 
 def main(config):
+    if config.use_liqe and not config.liqe_dir:
+        raise ValueError('--liqe_dir is required with --use_liqe')
+    if config.crop_size != 384 or config.resize < config.crop_size:
+        raise ValueError('RQ_VQA requires --crop_size 384 and --resize >= 384')
+    checkpoint_path = Path(config.pretrained_path)
+    if checkpoint_path.is_dir():
+        tag = 'LIQE' if config.use_liqe else 'noLIQE'
+        model_files = sorted(checkpoint_path.glob(f'RQ_VQA_{tag}_*.pth'))
+    else:
+        model_files = [checkpoint_path] if checkpoint_path.is_file() else []
+    if not model_files:
+        raise ValueError('No matching RQ_VQA checkpoints found')
+    if config.n_exp is not None:
+        if not 1 <= config.n_exp <= len(model_files):
+            raise ValueError('--n_exp must be between 1 and the number of matching checkpoints')
+        model_files = model_files[:config.n_exp]
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    transform = transforms.Compose([
+        transforms.Resize(config.resize), transforms.CenterCrop(config.crop_size),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
+    testset = BVQA_VideoDataset(
+        config.videos_dir, config.slowfast_dir, config.fastvqa_dir, config.datainfo,
+        transform, config.crop_size, use_liqe=config.use_liqe, data_dir_LIQE=config.liqe_dir,
+    )
+    test_loader = torch.utils.data.DataLoader(
+        testset, batch_size=1, shuffle=False, num_workers=config.num_workers,
+    )
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    if device.type == 'cuda' and config.gpu_ids:
+        device = torch.device(f'cuda:{config.gpu_ids[0]}')
+    # Full checkpoints already contain Swin weights; do not download ImageNet weights.
+    model = models.RQ_VQA(use_liqe=config.use_liqe, pretrained=False).to(device)
+    inference_model = model
+    if device.type == 'cuda' and config.gpu_ids and len(config.gpu_ids) > 1:
+        inference_model = torch.nn.DataParallel(model, device_ids=config.gpu_ids)
 
-
-    model_file = ['ckpts/Swin_b_384_in22k_SlowFast_Fast_LLM_LIQE_FASTVQA_BoT_NTIREVideo_plcc_NR_v0_epoch_9_SRCC_0.885692.pth',\
-                  'ckpts/Swin_b_384_in22k_SlowFast_Fast_LLM_LIQE_FASTVQA_BoT_NTIREVideo_plcc_NR_v1_epoch_22_SRCC_0.894115.pth',\
-                  'ckpts/Swin_b_384_in22k_SlowFast_Fast_LLM_LIQE_FASTVQA_BoT_NTIREVideo_plcc_NR_v2_epoch_25_SRCC_0.913571.pth',\
-                  'ckpts/Swin_b_384_in22k_SlowFast_Fast_LLM_LIQE_FASTVQA_BoT_NTIREVideo_plcc_NR_v3_epoch_16_SRCC_0.901800.pth',\
-                  'ckpts/Swin_b_384_in22k_SlowFast_Fast_LLM_LIQE_FASTVQA_BoT_NTIREVideo_plcc_NR_v4_epoch_6_SRCC_0.905095.pth',\
-                  'ckpts/Swin_b_384_in22k_SlowFast_Fast_LLM_LIQE_FASTVQA_BoT_NTIREVideo_plcc_NR_v0_epoch_4_SRCC_0.905999.pth',\
-                  'ckpts/Swin_b_384_in22k_SlowFast_Fast_LLM_LIQE_FASTVQA_BoT_NTIREVideo_plcc_NR_v1_epoch_19_SRCC_0.923127.pth',\
-                  'ckpts/Swin_b_384_in22k_SlowFast_Fast_LLM_LIQE_FASTVQA_BoT_NTIREVideo_plcc_NR_v2_epoch_21_SRCC_0.924423.pth',\
-                  'ckpts/Swin_b_384_in22k_SlowFast_Fast_LLM_LIQE_FASTVQA_BoT_NTIREVideo_plcc_NR_v3_epoch_8_SRCC_0.896798.pth',\
-                  'ckpts/Swin_b_384_in22k_SlowFast_Fast_LLM_LIQE_FASTVQA_BoT_NTIREVideo_plcc_NR_v4_epoch_14_SRCC_0.904949.pth']
-
-
-    
-    y_output_all = []
-    for i_exp in range(config.n_exp):
-
-
-
-        model = models.RQ_VQA_base_model(None)
-
-        model = torch.nn.DataParallel(model, device_ids=config.gpu_ids)
-
-        # load model
-        print('load the model ' + os.path.join(config.pretrained_path, model_file[i_exp]))
-        model.load_state_dict(torch.load(os.path.join(config.pretrained_path, model_file[i_exp])))
-        
-        transformations_test = transforms.Compose([transforms.Resize(config.resize),transforms.CenterCrop(config.crop_size),transforms.ToTensor(),\
-            transforms.Normalize(mean = [0.485, 0.456, 0.406], std = [0.229, 0.224, 0.225])])
-        
-        datainfo = 'data/test_data.csv'
-        videos_dir = 'test_image_384p/' # the path of video frames
-        feature_3D_dir = 'features/SlowFast/'
-
-        feature_LLM = 'features/QAlign/'
-        feature_LIQE_dir = 'features/LIQE/'
-        feature_FASTVQA_dir = 'featurs/FASTVQA/'
-        testset = BVQA_VideoDataset(videos_dir, feature_3D_dir, feature_LLM, \
-                            feature_LIQE_dir, feature_FASTVQA_dir, datainfo, transformations_test, config.crop_size)
-
-        test_loader = torch.utils.data.DataLoader(testset, batch_size=1,
-            shuffle=False, num_workers=config.num_workers)
-
-
-        # # Test
+    predictions = []
+    for path in model_files:
+        print(f'Loading {path}')
+        load_checkpoint(model, path)
+        inference_model.eval()
+        scores = []
         with torch.no_grad():
-            model.eval()
-            y_output = []
-            video_names = []
+            for *inputs, _ in test_loader:
+                scores.append(inference_model(*[feature.to(device) for feature in inputs]).item())
+        predictions.append(scores)
 
-            for i, (video, feature_3D, feature_LLM, feature_LIQE, feature_FASTVQA, video_name) in enumerate(test_loader):
-                
-                video = video.to(device)
-                feature_3D = feature_3D.to(device)
-                feature_LLM = feature_LLM.to(device)
-                feature_LIQE = feature_LIQE.to(device)
-                feature_FASTVQA = feature_FASTVQA.to(device)
-
-                outputs = model(video, feature_3D, feature_LLM, feature_LIQE, feature_FASTVQA)
-                y_output.append(outputs.item())
-                video_names.append(video_name[0])
-                print(video_name[0])
-
-            
-            y_output = np.array(y_output)
-        
-        
-        
-        y_output_all.append(y_output)
-    
-    y_output_ensemble = np.zeros(y_output.shape)
-
-    for i in range(len(y_output_all)):
-        y_output_ensemble += y_output_all[i]
-    
-    y_output_ensemble /= len(y_output_all)
-
-        
-
-    # overall 
-    test_data = []
-    for i in range(len(video_names)):
-        test_data.append([video_names[i], y_output_ensemble[i]])
-
-    column_names = ['filename','score']
-    test_data_df = pd.DataFrame(test_data, columns = column_names)
-    test_data_df.to_csv(config.save_file, index = False)
+    result = pd.DataFrame({'filename': testset.video_names, 'score': np.mean(predictions, axis=0)})
+    Path(config.save_file).parent.mkdir(parents=True, exist_ok=True)
+    result.to_csv(config.save_file, index=False)
 
 
-        
 if __name__ == '__main__':
-
     parser = argparse.ArgumentParser()
-    # input parameters
-    parser.add_argument('--pretrained_path', type=str, default=None)
-    parser.add_argument('--save_file', type=str, default=None)
+    parser.add_argument('--pretrained_path', required=True, help='Checkpoint file or directory')
+    parser.add_argument('--save_file', default='results.csv')
+    parser.add_argument('--use_liqe', action='store_true')
+    parser.add_argument('--datainfo', default='data/test_data.csv')
+    parser.add_argument('--videos_dir', default='test_image_384p')
+    parser.add_argument('--slowfast_dir', default='features/SlowFast')
+    parser.add_argument('--fastvqa_dir', default='features/FASTVQA')
+    parser.add_argument('--liqe_dir', default=None)
     parser.add_argument('--resize', type=int, default=384)
     parser.add_argument('--crop_size', type=int, default=384)
     parser.add_argument('--num_workers', type=int, default=8)
-    parser.add_argument('--n_exp', type=int)
-    parser.add_argument('--gpu_ids', type=list, default=None)
+    parser.add_argument('--n_exp', type=int, default=None, help='Default: use all matching checkpoints')
+    parser.add_argument('--gpu_ids', type=int, nargs='+', default=None)
     parser.add_argument('--random_seed', type=int, default=8)
-    
     config = parser.parse_args()
 
-    torch.manual_seed(config.random_seed)  #
+    torch.manual_seed(config.random_seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     np.random.seed(config.random_seed)

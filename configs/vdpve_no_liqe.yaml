@@ -1,0 +1,57 @@
+# Run: python -u train.py --config configs/vdpve_no_liqe.yaml
+# All relative paths below are relative to the RQ-VQA repository root.
+database: VDPVE
+model_name: RQ_VQA
+feature_root: /mnt/data/local-disk2/xyy/datasets/VDPVE/rqvqa_features
+
+datainfo: /mnt/data/local-disk2/xyy/datasets/FineVD/FineVD/train.txt
+val_datainfo: /mnt/data/local-disk2/xyy/datasets/FineVD/FineVD/val.txt
+videos_dir: ${feature_root}/train/image_384p
+slowfast_dir: ${feature_root}/train/SlowFast
+fastvqa_dir: ${feature_root}/train/FASTVQA
+val_videos_dir: ${feature_root}/val/image_384p
+val_slowfast_dir: ${feature_root}/val/SlowFast
+val_fastvqa_dir: ${feature_root}/val/FASTVQA
+
+# Enable only if both splits have LIQE features; checkpoint setting must match.
+use_liqe: false
+liqe_dir: ${feature_root}/train/LIQE
+val_liqe_dir: ${feature_root}/val/LIQE
+
+# LSVQ initializes the Swin branch. Full RQ-VQA fine-tuning uses finetune_path.
+# Set pretrained_path to null before setting finetune_path (mutually exclusive).
+pretrained_path: weights/Swin_b_384_in22k_SlowFast_Fast_LSVQ.pth
+finetune_path: null
+
+visible_devices: "0,1,2,3"
+gpu_ids: [0]  # Used only for single-process fallback; torchrun uses LOCAL_RANK.
+multi_gpu: false
+expected_world_size: 4
+random_seed: 10
+n_exp: 1
+num_workers: 4
+train_batch_size: 2  # Per GPU under DDP; four GPUs give global batch 8.
+resize: 384
+crop_size: 384
+
+epochs: 100  # Maximum; early stopping can finish sooner.
+early_stop_patience: 10  # Stop after 10 validations without a meaningful SRCC gain.
+early_stop_min_delta: 0.001
+loss_type: plcc
+backbone_lr: 0.000001
+head_lr: 0.00001
+freeze_backbone_epochs: 3
+warmup_epochs: 3
+min_lr_ratio: 0.01
+grad_clip_norm: 1.0
+amp: true
+amp_dtype: bfloat16
+amp_init_scale: 1024
+max_nonfinite_steps: 5
+sync_batchnorm: true
+weight_decay: 0.0000001
+print_samples: 120
+
+# Choose separate directories for different experiments/configurations.
+ckpt_path: ckpts/VDPVE_noLIQE_earlystop
+log_file: logs/VDPVE_noLIQE_earlystop.log

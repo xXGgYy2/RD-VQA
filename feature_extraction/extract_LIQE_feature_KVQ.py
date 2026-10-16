@@ -41,10 +41,9 @@ class Identity(nn.Module):
         return x
 
 class LIQE_feature(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, model_path='LIQE.pt'):
         super(LIQE_feature, self).__init__()
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model_path = 'LIQE.pt'
         model_LIQE = LIQE(model_path, device)
         self.feature_extraction = model_LIQE
 
@@ -62,8 +61,7 @@ class LIQE_feature(torch.nn.Module):
 
 def main(config):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model_LIQE = LIQE_feature()
-    model_LIQE = model_LIQE.to(device)
+    model_LIQE = LIQE_feature(config.model_path).to(device).eval()
 
 
 
@@ -107,6 +105,7 @@ if __name__ == '__main__':
     parser.add_argument('--videos_dir_test', type=str)
     parser.add_argument('--feature_save_folder', type=str)
     parser.add_argument('--datainfo_test', type=str)
+    parser.add_argument('--model_path', default='LIQE.pt')
 
     config = parser.parse_args()
     main(config)
